@@ -40,7 +40,7 @@ import yourdfpy
 
 from openrcm import instrument
 from openrcm.kinematics import HOME_CFG
-from openrcm.paths import URDF as RCM_URDF
+from openrcm.paths import RCM_URDF
 
 SHAFT_LINK = "instrument"
 TIP_LINK = "tool_tip"
@@ -126,19 +126,16 @@ def _solve(
             insertion_constraint(robot, var, shaft_idx, tip_idx, rcm_point),
         ]
     else:
-        costs += [shaft_direction_cost(robot, var, shaft_idx, tip_idx, direction, 10.0)]
+        costs.append(shaft_direction_cost(robot, var, shaft_idx, tip_idx, direction, 10.0))
     sol = (
-        jaxls.NonlinearLeastSquares(
+        jaxls.LeastSquaresProblem(costs=costs, variables=[var])
+        .analyze()
+        .solve(
+            initial_vals=jaxls.VarValues.make([var.with_value(prev_cfg)]),
             verbose=False,
-            trust_region=jaxls.TrustRegionConfig(
-                lambda_initial=1.0,
-                lambda_min=1e-6,
-                lambda_max=1e6,
-            ),
-            max_iters=60,
+            linear_solver="dense_cholesky",
+            trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
         )
-        .build(costs)
-        .solve(initial_vals=jaxls.VarValues.make({var: prev_cfg}))
     )
     return sol[var]
 
