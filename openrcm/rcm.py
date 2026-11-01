@@ -118,7 +118,7 @@ def _solve(
     costs = [
         tip_position_cost(robot, var, shaft_idx, tip_idx, target, 100.0),
         pk.costs.limit_constraint(robot, var),
-        pk.costs.rest_cost(var, prev_cfg, weight=0.02),
+        pk.costs.rest_cost(var, prev_cfg, weight=0.08),
     ]
     if use_rcm:
         costs += [
@@ -134,7 +134,12 @@ def _solve(
             initial_vals=jaxls.VarValues.make([var.with_value(prev_cfg)]),
             verbose=False,
             linear_solver="dense_cholesky",
-            trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
+            trust_region=jaxls.TrustRegionConfig(
+                lambda_initial=1.0,
+                lambda_min=1e-6,
+                lambda_max=1e6,
+            ),
+            termination=jaxls.TerminationConfig(max_iterations=60),
         )
     )
     return sol[var]

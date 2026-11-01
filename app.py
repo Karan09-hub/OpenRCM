@@ -65,11 +65,16 @@ leaves **1 redundant DOF**: the tool's roll about its own shaft.
 
 def turn_toward(current: onp.ndarray, goal: onp.ndarray, max_angle: float) -> onp.ndarray:
     """Rotate unit vector `current` toward `goal` by at most `max_angle` radians."""
-    angle = float(onp.arccos(onp.clip(current @ goal, -1.0, 1.0)))
-    if angle <= max_angle:
+    dot = float(onp.clip(current @ goal, -1.0, 1.0))
+    angle = float(onp.arccos(dot))
+    if angle <= max_angle or angle < 1e-7:
         return goal.copy()
-    v = current * onp.cos(max_angle) + onp.sin(max_angle) * (goal - current * onp.cos(angle)) / onp.sin(angle)
-    return v / onp.linalg.norm(v)
+    sin_a = onp.sin(angle)
+    if sin_a < 1e-7:
+        return goal.copy()
+    v = current * onp.cos(max_angle) + (goal - current * dot) * (onp.sin(max_angle) / sin_a)
+    norm = onp.linalg.norm(v)
+    return v / norm if norm > 1e-7 else goal.copy()
 
 
 def step_toward(current: onp.ndarray, goal: onp.ndarray, max_step: float) -> onp.ndarray:
@@ -274,6 +279,10 @@ class RCMApp:
         )
         self.obj_frame.position, self.obj_frame.wxyz = self.obj_handle.position, self.obj_handle.wxyz
         self._refresh_path()
+        self.u = 0.0
+        self.direction = 1.0
+        self.tip_cmd = self.path_pts[0].copy()
+        self._clear_trails()
 
     def _reset_object(self) -> None:
         self.obj_handle.position, self.obj_handle.wxyz = (-0.42, 0.0, 0.10), (1.0, 0.0, 0.0, 0.0)
@@ -283,16 +292,25 @@ class RCMApp:
         self.obj.shape = self.surface.value
         self._refresh_object_mesh()
         self._refresh_path()
+        self.u = 0.0
+        self.direction = 1.0
+        self.tip_cmd = self.path_pts[0].copy()
+        self._clear_trails()
 
     def _on_path_changed(self) -> None:
         self.obj.pattern = self.pattern.value
         self.obj.size = self.size.value / 1000
         self.obj.path_offset = onp.array([self.offset_x.value, self.offset_y.value]) / 1000
         self._refresh_path()
-        self.u = min(self.u, len(self.path_pts) - 1)
+        self.u = 0.0
+        self.direction = 1.0
+        self.tip_cmd = self.path_pts[0].copy()
+        self._clear_trails()
 
     def _restart(self) -> None:
         self.u, self.direction = 0.0, 1.0
+        self.tip_cmd = self.path_pts[0].copy()
+        self._clear_trails()
 
     def _clear_trails(self) -> None:
         self.trail_tip.clear()
@@ -359,14 +377,19 @@ class RCMApp:
         self.u += self.direction * self.speed.value / 1000 * CONTROL_DT / PATH_SPACING
         if closed:
             self.u %= n - 1
-        elif self.u >= n - 1 or self.u <= 0:  # open paths go back and forth
-            self.u = float(onp.clip(self.u, 0, n - 1))
-            self.direction *= -1
+        elif self.u >= n - 1:
+            self.u = float(n - 1)
+            self.direction = -1.0
+        elif self.u <= 0:
+            self.u = 0.0
+            self.direction = 1.0
 
     def _path_point(self) -> tuple[onp.ndarray, onp.ndarray]:
-        i = int(min(self.u, len(self.path_pts) - 2))
-        f = self.u - i
-        p = self.path_pts[i] * (1 - f) + self.path_pts[i + 1] * f
+        n = len(self.path_pts)
+        u_clamped = float(onp.clip(self.u, 0.0, n - 1.0001))
+        i = int(u_clamped)
+        f = u_clamped - i
+        p = self.path_pts[i] * (1.0 - f) + self.path_pts[i + 1] * f
         return p, self.path_normals[i]
 
     def tick(self) -> None:
@@ -385,10 +408,15 @@ class RCMApp:
         else:
             self.dir_cmd = turn_toward(self.dir_cmd, -normal, SHAFT_TURN_LIMIT * CONTROL_DT)
         q_new = self.kin.solve(self.tip_cmd, self.q, rcm, self.dir_cmd)
+        delta_q = q_new - self.q
         max_step = self.kin.velocity_limit * CONTROL_DT
-        q_new = self.q + onp.clip(q_new - self.q, -max_step, max_step)
-        self.joint_speed = onp.abs(q_new - self.q) / CONTROL_DT
-        self.q = q_new
+        # Branch-jump rejection: if any joint attempts to jump > 25 deg in one tick, reject to prevent wild flailing
+        if float(onp.max(onp.abs(delta_q))) < 0.45:
+            step = onp.clip(delta_q, -max_step, max_step)
+            self.q = self.q + step
+            self.joint_speed = onp.abs(step) / CONTROL_DT
+        else:
+            self.joint_speed = onp.zeros(6)
         self.t += CONTROL_DT
         self.state = self.kin.tool_state(self.q, self.rcm_desired)
         self.target = target
@@ -444,9 +472,16 @@ class RCMApp:
         ):
             if len(trail) > 1:
                 p = onp.asarray(trail)
-                self.server.scene.add_line_segments(
-                    name, onp.stack([p[:-1], p[1:]], axis=1), color, thickness=2.5, thickness_units="screen"
-                )
+                # Discard segments across jumps (e.g. wrap-around or path reset) > 25 mm
+                diff = onp.linalg.norm(p[1:] - p[:-1], axis=1)
+                valid = diff < 0.025
+                if onp.any(valid):
+                    seg = onp.stack([p[:-1][valid], p[1:][valid]], axis=1)
+                    self.server.scene.add_line_segments(
+                        name, seg, color, thickness=2.5, thickness_units="screen"
+                    )
+                else:
+                    self.server.scene.remove_by_name(name)
             else:
                 self.server.scene.remove_by_name(name)
 
