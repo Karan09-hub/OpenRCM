@@ -1,0 +1,19 @@
+# OpenRCM dependencies
+# Install with: pip install -r requirements.txt
+# Note: jaxls and pyroki are installed directly from GitHub archives.
+jaxls @ https://github.com/brentyi/jaxls/archive/refs/heads/main.zip
+pyroki @ https://github.com/chungmin99/pyroki/archive/refs/heads/main.zip
+jax>=0.4.20
+jaxlib>=0.4.20
+jaxlie>=1.4.0
+jax_dataclasses
+jaxtyping
+loguru
+tyro>=0.8.0
+viser>=0.2.0
+yourdfpy>=0.0.50
+trimesh>=4.0.0
+pycollada>=0.8.0
+numpy>=1.24.0
+scipy>=1.10.0
+pytest>=7.0.0
